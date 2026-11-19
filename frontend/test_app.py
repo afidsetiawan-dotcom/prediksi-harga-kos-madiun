@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import socket
@@ -5,6 +6,7 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 import requests
@@ -18,6 +20,8 @@ class StreamlitAppTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._previous_api_url = os.environ.get("DJANGO_API_URL")
+        cls._previous_prediction_mode = os.environ.get("PREDICTION_MODE")
+        cls._previous_groq_api_key = os.environ.get("GROQ_API_KEY")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             cls._port = sock.getsockname()[1]
@@ -35,6 +39,8 @@ class StreamlitAppTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
         os.environ["DJANGO_API_URL"] = cls._api_url
+        os.environ["PREDICTION_MODE"] = "django"
+        os.environ["GROQ_API_KEY"] = ""
         for _ in range(100):
             if cls._server.poll() is not None:
                 raise RuntimeError("Django test server exited before becoming ready.")
@@ -57,6 +63,14 @@ class StreamlitAppTests(unittest.TestCase):
             os.environ.pop("DJANGO_API_URL", None)
         else:
             os.environ["DJANGO_API_URL"] = cls._previous_api_url
+        if cls._previous_prediction_mode is None:
+            os.environ.pop("PREDICTION_MODE", None)
+        else:
+            os.environ["PREDICTION_MODE"] = cls._previous_prediction_mode
+        if cls._previous_groq_api_key is None:
+            os.environ.pop("GROQ_API_KEY", None)
+        else:
+            os.environ["GROQ_API_KEY"] = cls._previous_groq_api_key
 
     def run_page(self, page: str) -> AppTest:
         app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
@@ -141,6 +155,111 @@ class StreamlitAppTests(unittest.TestCase):
         )
         self.assertTrue(
             any("tidak menggunakan database" in item.value for item in app.warning)
+        )
+
+
+class CommunityCloudDirectModeTests(unittest.TestCase):
+    def test_direct_mode_pages_and_diagram_fallbacks_do_not_call_django(self):
+        with patch.dict(
+            os.environ,
+            {"PREDICTION_MODE": "direct", "GROQ_API_KEY": ""},
+        ):
+            with patch("requests.get") as get, patch("requests.post") as post:
+                app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+                self.assertEqual(app.exception, [])
+                self.assertEqual(len(app.get("vega_lite_chart")), 4)
+                self.assertTrue(
+                    any(
+                        "Mode prediksi" == metric.label and metric.value == "Langsung"
+                        for metric in app.metric
+                    )
+                )
+                self.assertEqual(
+                    sum("Penjelasan AI belum diaktifkan" in item.value for item in app.info),
+                    4,
+                )
+
+                app.radio(key="navigation").set_value(
+                    ":material/dataset:  Dataset"
+                ).run()
+                self.assertEqual(app.exception, [])
+                self.assertEqual(len(app.get("vega_lite_chart")), 2)
+                self.assertEqual(
+                    sum("Penjelasan AI belum diaktifkan" in item.value for item in app.info),
+                    2,
+                )
+
+                app.radio(key="navigation").set_value(
+                    ":material/analytics:  Evaluasi Model"
+                ).run()
+                self.assertEqual(app.exception, [])
+                self.assertEqual(len(app.get("vega_lite_chart")), 1)
+                self.assertEqual(
+                    sum("Penjelasan AI belum diaktifkan" in item.value for item in app.info),
+                    1,
+                )
+
+                app.radio(key="navigation").set_value(
+                    ":material/info:  Tentang Aplikasi"
+                ).run()
+                self.assertEqual(app.exception, [])
+                get.assert_not_called()
+                post.assert_not_called()
+
+    def test_direct_prediction_supports_both_ac_values_and_rupiah_conversion(self):
+        from ml.train_model import fit_production_model
+
+        artifact = fit_production_model()
+        with patch.dict(
+            os.environ,
+            {"PREDICTION_MODE": "direct", "GROQ_API_KEY": ""},
+        ):
+            with patch("requests.get") as get, patch("requests.post") as post:
+                app = AppTest.from_file(str(APP_PATH), default_timeout=20).run()
+                app.radio(key="navigation").set_value(
+                    ":material/auto_awesome:  Prediksi Harga"
+                ).run()
+                for ac in ("ya", "tidak"):
+                    app.selectbox(key="prediction_ac").set_value(ac).run()
+                    next(
+                        button
+                        for button in app.button
+                        if button.label == "Prediksi Harga Kos"
+                    ).click().run()
+                    self.assertEqual(app.exception, [])
+                    prediction = app.session_state["latest_prediction"]
+                    self.assertEqual(prediction["ac"], ac)
+                    model_input = pd.DataFrame(
+                        [[
+                            prediction["jarak_km"],
+                            prediction["rating"],
+                            artifact["ac_mapping"][ac],
+                        ]],
+                        columns=artifact["features"],
+                    )
+                    expected_price = float(artifact["model"].predict(model_input)[0])
+                    self.assertEqual(
+                        prediction["harga_prediksi_rupiah"],
+                        round(expected_price * 1000),
+                    )
+                    self.assertEqual(prediction["algoritma"], "Linear Regression")
+                get.assert_not_called()
+                post.assert_not_called()
+
+    def test_production_model_uses_all_rows_and_preserves_metrics(self):
+        from ml.train_model import fit_production_model
+
+        artifact = fit_production_model()
+        report = json.loads(
+            (ROOT / "ml" / "artifacts" / "evaluation_metrics.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(artifact["training_rows"], 30)
+        self.assertEqual(artifact["features"], ["jarak_km", "rating", "ac_num"])
+        self.assertEqual(artifact["ac_mapping"], {"tidak": 0, "ya": 1})
+        self.assertEqual(
+            artifact["metrics"], report["holdout"]["linear_regression"]
         )
 
 

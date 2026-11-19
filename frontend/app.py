@@ -1,4 +1,7 @@
+import hashlib
+import json
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,11 +12,37 @@ import streamlit as st
 import altair as alt
 from dotenv import load_dotenv
 from groq_explainer import show_diagram_explanation
+from streamlit.errors import StreamlitSecretNotFoundError
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+from ml.train_model import fit_production_model
 
-API_URL = os.getenv("DJANGO_API_URL", "http://127.0.0.1:8000/api/").rstrip("/") + "/"
-DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "kos_madiun.csv"
+load_dotenv(ROOT_DIR / ".env")
+
+
+def get_app_setting(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value and value.strip():
+        return value.strip()
+    try:
+        return str(st.secrets.get(name, default)).strip()
+    except StreamlitSecretNotFoundError:
+        return default
+
+
+PREDICTION_MODE = get_app_setting("PREDICTION_MODE", "django").lower()
+if PREDICTION_MODE not in {"django", "direct"}:
+    raise ValueError("PREDICTION_MODE harus bernilai 'django' atau 'direct'.")
+API_URL = (
+    os.getenv("DJANGO_API_URL", "http://127.0.0.1:8000/api/").rstrip("/") + "/"
+    if PREDICTION_MODE == "django"
+    else None
+)
+DATA_PATH = ROOT_DIR / "data" / "kos_madiun.csv"
+EVALUATION_PATH = ROOT_DIR / "ml" / "artifacts" / "evaluation_metrics.json"
+
 PAGES = [
     ":material/dashboard:  Dashboard",
     ":material/auto_awesome:  Prediksi Harga",
@@ -68,6 +97,8 @@ st.html(
 
 @st.cache_data(ttl=60)
 def fetch_summary():
+    if API_URL is None:
+        raise RuntimeError("Summary API hanya tersedia dalam mode Django.")
     response = requests.get(API_URL + "summary/", timeout=5)
     response.raise_for_status()
     return response.json()
@@ -80,7 +111,92 @@ def load_dataset():
     return frame
 
 
+@st.cache_resource
+def load_direct_model() -> dict:
+    return fit_production_model()
+
+
+def get_direct_summary() -> dict:
+    dataset = load_dataset()
+    artifact = load_direct_model()
+    try:
+        report = json.loads(EVALUATION_PATH.read_text(encoding="utf-8"))
+        dataset_hash = hashlib.sha256(DATA_PATH.read_bytes()).hexdigest().upper()
+        if report["dataset"]["sha256"].upper() != dataset_hash:
+            evaluation = {
+                "available": False,
+                "status": "dataset_mismatch",
+                "detail": "Dataset berubah sejak evaluasi; metrik perlu diperbarui.",
+            }
+        elif report["holdout"]["linear_regression"] != artifact["metrics"]:
+            evaluation = {
+                "available": False,
+                "status": "model_metrics_mismatch",
+                "detail": "Metrik evaluasi tidak cocok dengan model yang dilatih.",
+            }
+        else:
+            evaluation = {"available": True, "status": "current", **report}
+    except FileNotFoundError:
+        evaluation = {
+            "available": False,
+            "status": "missing",
+            "detail": "File evaluasi belum tersedia.",
+        }
+    except (json.JSONDecodeError, KeyError, TypeError):
+        evaluation = {
+            "available": False,
+            "status": "invalid",
+            "detail": "File evaluasi tidak valid.",
+        }
+
+    return {
+        "jumlah_data": int(len(dataset)),
+        "rata_rata_harga": float(dataset["harga"].mean()),
+        "harga_minimum": float(dataset["harga"].min()),
+        "harga_maksimum": float(dataset["harga"].max()),
+        "rata_rata_harga_ac": float(dataset.loc[dataset["ac"] == "ya", "harga"].mean()),
+        "rata_rata_harga_tanpa_ac": float(
+            dataset.loc[dataset["ac"] == "tidak", "harga"].mean()
+        ),
+        "model": {
+            "algorithm": artifact["algorithm"],
+            "features": artifact["features"],
+            "training_rows": artifact["training_rows"],
+            "metrics": artifact["metrics"],
+        },
+        "evaluation": evaluation,
+    }
+
+
+def get_summary() -> dict:
+    if PREDICTION_MODE == "direct":
+        return get_direct_summary()
+    return fetch_summary()
+
+
+def predict_direct(jarak_km: float, rating: float, ac: str) -> dict:
+    artifact = load_direct_model()
+    row = pd.DataFrame(
+        [[jarak_km, rating, artifact["ac_mapping"][ac]]],
+        columns=artifact["features"],
+    )
+    price = float(artifact["model"].predict(row)[0])
+    if not np.isfinite(price) or price < 0:
+        raise ValueError("Model menghasilkan harga yang tidak valid.")
+    return {
+        "jarak_km": jarak_km,
+        "rating": rating,
+        "ac": ac,
+        "harga_prediksi_ribu": round(price, 2),
+        "harga_prediksi_rupiah": round(price * 1000),
+        "algoritma": artifact["algorithm"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def backend_status() -> dict:
+    if API_URL is None:
+        raise RuntimeError("Health API hanya tersedia dalam mode Django.")
     try:
         response = requests.get(API_URL + "health/", timeout=3)
         payload = response.json()
@@ -207,6 +323,9 @@ def build_relationship_chart(
 
 
 def show_backend_status(status: dict) -> None:
+    if status.get("mode") == "direct":
+        st.sidebar.success("Prediksi langsung aktif")
+        return
     if status["reachable"] and status["model_available"]:
         st.sidebar.success("Backend dan model aktif")
     elif status["reachable"]:
@@ -251,7 +370,7 @@ def render_dashboard(status: dict) -> None:
         st.write("Temukan estimasi harga kos berdasarkan jarak, rating, dan fasilitas.")
     dataset = load_dataset()
     try:
-        summary = fetch_summary()
+        summary = get_summary()
     except requests.RequestException as exc:
         summary = None
         st.warning(f"Ringkasan dari backend belum tersedia: {exc}")
@@ -286,9 +405,15 @@ def render_dashboard(status: dict) -> None:
             border=True,
             height="stretch",
         )
+        if status.get("mode") == "direct":
+            status_label, status_value = "Mode prediksi", "Langsung"
+        elif status["reachable"]:
+            status_label, status_value = "Status backend", "Terhubung"
+        else:
+            status_label, status_value = "Status backend", "Tidak terhubung"
         st.metric(
-            "Status backend",
-            "Terhubung" if status["reachable"] else "Tidak terhubung",
+            status_label,
+            status_value,
             border=True,
             height="stretch",
         )
@@ -419,7 +544,15 @@ def render_dashboard(status: dict) -> None:
             )
 def render_prediction() -> None:
     st.title("Prediksi Harga Kos", icon=":material/auto_awesome:")
-    st.write("Masukkan karakteristik kos untuk mendapatkan estimasi dari model Django.")
+    prediction_source = (
+        "model Linear Regression langsung di Streamlit."
+        if PREDICTION_MODE == "direct"
+        else "model Django."
+    )
+    st.write(
+        f"Masukkan karakteristik kos untuk mendapatkan estimasi dari "
+        f"{prediction_source}"
+    )
     with st.container(border=True, key="prediction-form"):
         st.subheader("Karakteristik kos", icon=":material/tune:")
         input_cols = st.columns(2)
@@ -438,30 +571,45 @@ def render_prediction() -> None:
         )
 
     if submitted:
-        try:
-            response = requests.post(
-                API_URL + "predict/",
-                json={"jarak_km": jarak, "rating": rating, "ac": ac},
-                timeout=5,
-            )
-            result = response.json()
-            if response.ok and result.get("success"):
-                prediction = result.get("data", result)
+        if PREDICTION_MODE == "direct":
+            try:
+                prediction = predict_direct(jarak, rating, ac)
                 st.session_state.latest_prediction = prediction
-                st.session_state.latest_prediction_rupiah = int(
-                    prediction.get(
-                        "harga_prediksi_rupiah",
-                        round(prediction["harga_prediksi_ribu"] * 1000),
-                    )
-                )
+                st.session_state.latest_prediction_rupiah = prediction[
+                    "harga_prediksi_rupiah"
+                ]
                 st.success("Prediksi berhasil.")
-            else:
-                errors = result.get("errors", result.get("detail", "Input atau model tidak valid."))
-                st.error(f"Prediksi tidak berhasil: {errors}")
-        except requests.RequestException as exc:
-            st.error(f"Tidak dapat menghubungi backend Django: {exc}")
-        except (KeyError, TypeError, ValueError) as exc:
-            st.error(f"Respons backend tidak sesuai format: {exc}")
+            except (KeyError, TypeError, ValueError) as exc:
+                st.error(f"Prediksi tidak berhasil: {exc}")
+        else:
+            try:
+                if API_URL is None:
+                    raise RuntimeError("Django API tidak tersedia dalam mode ini.")
+                response = requests.post(
+                    API_URL + "predict/",
+                    json={"jarak_km": jarak, "rating": rating, "ac": ac},
+                    timeout=5,
+                )
+                result = response.json()
+                if response.ok and result.get("success"):
+                    prediction = result.get("data", result)
+                    st.session_state.latest_prediction = prediction
+                    st.session_state.latest_prediction_rupiah = int(
+                        prediction.get(
+                            "harga_prediksi_rupiah",
+                            round(prediction["harga_prediksi_ribu"] * 1000),
+                        )
+                    )
+                    st.success("Prediksi berhasil.")
+                else:
+                    errors = result.get(
+                        "errors", result.get("detail", "Input atau model tidak valid.")
+                    )
+                    st.error(f"Prediksi tidak berhasil: {errors}")
+            except requests.RequestException as exc:
+                st.error(f"Tidak dapat menghubungi backend Django: {exc}")
+            except (KeyError, TypeError, ValueError) as exc:
+                st.error(f"Respons backend tidak sesuai format: {exc}")
 
     latest = st.session_state.get("latest_prediction")
     if latest:
@@ -651,7 +799,7 @@ def render_evaluation() -> None:
         "Metrik regresi dihitung dari hasil evaluasi tercatat, bukan dari prediksi yang dibuat saat ini."
     )
     try:
-        summary = fetch_summary()
+        summary = get_summary()
     except requests.RequestException as exc:
         st.error(f"Evaluasi tidak dapat dimuat dari backend: {exc}")
         return
@@ -799,6 +947,13 @@ def render_evaluation() -> None:
 def render_about() -> None:
     st.title("Tentang Aplikasi", icon=":material/info:")
     st.write("Ringkasan tujuan, teknologi, dan alur estimasi harga kos Madiun.")
+    workflow_description = (
+        "Dalam mode direct, Streamlit melatih Linear Regression dari dataset dan "
+        "memprediksi tanpa server Django."
+        if PREDICTION_MODE == "direct"
+        else "Jarak, rating, dan ketersediaan AC dikirim ke Django REST API. "
+        "Model memproses masukan tersebut dan mengembalikan estimasi harga."
+    )
     with st.grid(2, min_column_width=260, gap="small"):
         with st.container(border=True, height="stretch"):
             st.subheader("Tujuan aplikasi", icon=":material/home_work:")
@@ -820,17 +975,24 @@ def render_about() -> None:
             st.caption("Harga dan hasil estimasi menggunakan ribu rupiah per bulan.")
         with st.container(border=True, height="stretch"):
             st.subheader("Cara kerja", icon=":material/route:")
-            st.write(
-                "Jarak, rating, dan ketersediaan AC dikirim ke Django REST API. "
-                "Model memproses masukan tersebut dan mengembalikan estimasi harga."
-            )
+            st.write(workflow_description)
     st.info(
         "Hasil prediksi merupakan estimasi dan tidak menjamin harga pasar aktual."
     )
     st.warning("Aplikasi tidak menggunakan database.")
 
 
-status = backend_status()
+if PREDICTION_MODE == "direct":
+    direct_artifact = load_direct_model()
+    status = {
+        "mode": "direct",
+        "reachable": True,
+        "model_available": True,
+        "algorithm": direct_artifact["algorithm"],
+        "training_rows": direct_artifact["training_rows"],
+    }
+else:
+    status = {"mode": "django", **backend_status()}
 with st.sidebar:
     st.subheader("Prediksi Harga Kos Madiun", icon=":material/home:")
     st.caption("Dashboard estimasi harga hunian")

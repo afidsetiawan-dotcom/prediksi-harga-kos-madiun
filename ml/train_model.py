@@ -34,7 +34,7 @@ def load_and_prepare_data(path: Path = DATA_PATH) -> tuple[pd.DataFrame, pd.Seri
     return frame[FEATURES], frame["harga"]
 
 
-def train() -> dict:
+def fit_production_model() -> dict:
     features, target = load_and_prepare_data()
     x_train, x_test, y_train, y_test = train_test_split(
         features, target, test_size=0.2, random_state=42
@@ -57,9 +57,14 @@ def train() -> dict:
         "training_rows": int(len(features)),
         "algorithm": "Linear Regression",
     }
+    return artifact
+
+
+def train() -> dict:
+    artifact = fit_production_model()
     ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(artifact, ARTIFACT_PATH)
-    print(json.dumps(metrics, indent=2))
+    print(json.dumps(artifact["metrics"], indent=2))
     print(f"Model tersimpan di: {ARTIFACT_PATH}")
     return artifact
 

@@ -69,6 +69,7 @@ Contoh `.env` lokal (isi key secara lokal, jangan commit file ini):
 ```dotenv
 GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-120b
+PREDICTION_MODE=django
 ```
 
 Untuk deployment Streamlit, tambahkan konfigurasi berikut ke `.streamlit/secrets.toml`:
@@ -79,6 +80,29 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 ```
 
 `secrets.toml` juga diabaikan Git. Tanpa API key, diagram dan fitur lain tetap berfungsi, sedangkan aplikasi memberi tahu bahwa penjelasan AI belum diaktifkan. Kegagalan layanan Groq tidak menghentikan aplikasi. Penjelasan yang berhasil dihasilkan di-cache selama 24 jam berdasarkan model dan data diagram.
+
+## Deployment Streamlit Community Cloud
+
+Aplikasi dapat dijalankan tanpa hosting backend terpisah.
+
+1. Di Streamlit Community Cloud, pilih **Create app** dan repository GitHub `afidsetiawan-dotcom/prediksi-harga-kos-madiun`.
+2. Pilih branch `main` dan entry point `frontend/app.py`.
+3. Pada **Advanced settings**, gunakan Python 3.12 (versi default Community Cloud dan kompatibel dengan dependency yang dipin).
+4. Isi **Settings → Secrets** dengan konfigurasi berikut; masukkan API key langsung pada dashboard Streamlit, bukan ke Git.
+
+```toml
+GROQ_API_KEY = ""
+GROQ_MODEL = "openai/gpt-oss-120b"
+PREDICTION_MODE = "direct"
+```
+
+5. Simpan pengaturan dan deploy secara manual.
+
+File `frontend/requirements.txt` berisi dependency khusus frontend dan berada di samping entry point sehingga Community Cloud memilihnya sebelum `requirements.txt` root.
+
+Mode `direct` tidak memanggil health, summary, atau endpoint prediksi Django. Aplikasi memuat dataset dari root repository dan menjalankan prosedur training produksi (evaluasi holdout lalu fit Linear Regression pada seluruh data) sekali per proses Streamlit melalui `st.cache_resource`. Evaluasi tetap membaca snapshot yang divalidasi terhadap hash dataset. Mode lokal tetap menggunakan Django API (`PREDICTION_MODE=django`, default untuk `.env.example`).
+
+Repository tidak memuat artefak Joblib (`ml/artifacts/*.joblib` diabaikan Git); mode Community Cloud membuat model langsung dari dataset tanpa menulis atau membutuhkan artefak tersebut. Deployment dilakukan manual melalui dashboard Streamlit Community Cloud.
 
 Untuk training ulang secara sengaja:
 
@@ -116,6 +140,7 @@ Buka alamat Streamlit yang ditampilkan, biasanya `http://localhost:8501`.
 backend/                 Django REST API
 data/kos_madiun.csv      Dataset aplikasi
 frontend/                Aplikasi Streamlit dan integrasi Groq
+frontend/requirements.txt Dependency frontend untuk Community Cloud
 ml/train_model.py        Pipeline training model
 ml/artifacts/            Artefak lokal Joblib (diabaikan Git)
 tests/                   Tes integrasi Groq
