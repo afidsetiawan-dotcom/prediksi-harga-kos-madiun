@@ -4,6 +4,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -11,6 +12,12 @@ from unittest.mock import patch
 import pandas as pd
 import requests
 from streamlit.testing.v1 import AppTest
+
+from ml.evaluate_model import build_evaluation_report
+from ml.train_model import (
+    canonical_dataset_sha256,
+    fit_production_model,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "frontend" / "app.py"
@@ -159,6 +166,34 @@ class StreamlitAppTests(unittest.TestCase):
 
 
 class CommunityCloudDirectModeTests(unittest.TestCase):
+    def test_evaluation_snapshot_uses_the_canonical_dataset_and_holdout(self):
+        report = build_evaluation_report()
+        production = fit_production_model()
+
+        self.assertEqual(report["dataset"]["sha256"], canonical_dataset_sha256())
+        self.assertEqual(report["dataset"]["rows"], 30)
+        self.assertEqual(report["holdout"]["training_rows"], 24)
+        self.assertEqual(report["holdout"]["test_rows"], 6)
+        self.assertEqual(
+            report["holdout"]["linear_regression"], production["metrics"]
+        )
+
+    def test_dataset_fingerprint_ignores_newline_convention(self):
+        original = (ROOT / "data" / "kos_madiun.csv").read_bytes()
+        lf_contents = original.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        crlf_contents = lf_contents.replace(b"\n", b"\r\n")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lf_path = Path(temp_dir) / "lf.csv"
+            crlf_path = Path(temp_dir) / "crlf.csv"
+            lf_path.write_bytes(lf_contents)
+            crlf_path.write_bytes(crlf_contents)
+
+            self.assertEqual(
+                canonical_dataset_sha256(lf_path),
+                canonical_dataset_sha256(crlf_path),
+            )
+
     def test_direct_mode_pages_and_diagram_fallbacks_do_not_call_django(self):
         with patch.dict(
             os.environ,

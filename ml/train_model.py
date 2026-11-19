@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -13,8 +14,14 @@ from sklearn.model_selection import train_test_split
 ROOT = Path(__file__).resolve().parents[1]
 DATA_PATH = ROOT / "data" / "kos_madiun.csv"
 ARTIFACT_PATH = ROOT / "ml" / "artifacts" / "model_kos.joblib"
+EVALUATION_REPORT_PATH = ROOT / "ml" / "artifacts" / "evaluation_metrics.json"
 FEATURES = ["jarak_km", "rating", "ac_num"]
 AC_MAPPING = {"tidak": 0, "ya": 1}
+
+
+def canonical_dataset_sha256(path: Path = DATA_PATH) -> str:
+    contents = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(contents).hexdigest().upper()
 
 
 def load_and_prepare_data(path: Path = DATA_PATH) -> tuple[pd.DataFrame, pd.Series]:

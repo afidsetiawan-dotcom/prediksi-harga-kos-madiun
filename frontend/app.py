@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import sys
@@ -17,7 +16,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-from ml.train_model import fit_production_model
+from ml.train_model import canonical_dataset_sha256, fit_production_model
 
 load_dotenv(ROOT_DIR / ".env")
 
@@ -121,7 +120,7 @@ def get_direct_summary() -> dict:
     artifact = load_direct_model()
     try:
         report = json.loads(EVALUATION_PATH.read_text(encoding="utf-8"))
-        dataset_hash = hashlib.sha256(DATA_PATH.read_bytes()).hexdigest().upper()
+        dataset_hash = canonical_dataset_sha256(DATA_PATH)
         if report["dataset"]["sha256"].upper() != dataset_hash:
             evaluation = {
                 "available": False,

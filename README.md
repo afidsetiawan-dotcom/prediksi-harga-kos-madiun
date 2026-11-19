@@ -110,7 +110,13 @@ Untuk training ulang secara sengaja:
 python ml/train_model.py
 ```
 
-Artefak Joblib tidak disimpan di Git; buat artefak model sebelum menjalankan backend jika belum tersedia. Training memperbarui artefak Joblib; setelah mengganti dataset atau model, evaluasi diagnostik di `ml/artifacts/evaluation_metrics.json` harus dijalankan dan diverifikasi ulang. Jangan menyajikan snapshot lama sebagai metrik model baru.
+Artefak Joblib tidak disimpan di Git; buat artefak model sebelum menjalankan backend jika belum tersedia. Training memperbarui artefak Joblib; setelah mengganti dataset atau model, regenerasi dan verifikasi snapshot evaluasi dengan:
+
+```powershell
+python -m ml.evaluate_model
+```
+
+Fingerprint dataset menormalkan newline ke LF agar identitas dataset tetap sama pada checkout Windows dan Linux. Evaluasi memakai holdout `test_size=0.2` dan `random_state=42`; evaluator hanya di-fit pada data train. Model produksi tetap di-fit terpisah pada seluruh data valid. Jangan menyajikan snapshot lama sebagai metrik model baru.
 
 Jalankan backend di terminal pertama:
 

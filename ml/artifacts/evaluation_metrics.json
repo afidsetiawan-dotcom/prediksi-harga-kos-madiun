@@ -1,11 +1,15 @@
 {
-  "source": "Audit diagnostik model Linear Regression, 2026-11-20",
+  "source": "ml/evaluate_model.py",
   "algorithm": "Linear Regression",
-  "features": ["jarak_km", "rating", "ac_num"],
+  "features": [
+    "jarak_km",
+    "rating",
+    "ac_num"
+  ],
   "dataset": {
     "path": "data/kos_madiun.csv",
     "rows": 30,
-    "sha256": "2794F6B1F34A97162EE371F267C4082833EE7F29FE6DA217498DC9B517235688"
+    "sha256": "19D2BAEC66F8F0A3E9EA85DC9D5FEE5AEB6E8F5CFCDD8074C1983FF22B4375F3"
   },
   "holdout": {
     "test_size": 0.2,
@@ -43,8 +47,8 @@
     }
   },
   "notes": [
-    "Holdout metrics are from an evaluator fitted on the 24-row training split.",
-    "The production Joblib estimator is separately fitted on all 30 rows.",
+    "Holdout metrics are from an evaluator fitted on the training split only.",
+    "The production Joblib estimator is separately fitted on all valid rows.",
     "LOO is supplementary and was not used to tune the model.",
     "All metrics use thousand rupiah per month as the target unit."
   ]

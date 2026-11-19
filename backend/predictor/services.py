@@ -1,10 +1,15 @@
-import hashlib
 import json
+import sys
 from functools import lru_cache
 from pathlib import Path
 import joblib
 import pandas as pd
 from django.conf import settings
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+from ml.train_model import canonical_dataset_sha256
 
 @lru_cache(maxsize=1)
 def get_artifact() -> dict:
@@ -28,7 +33,7 @@ def evaluation_summary(artifact: dict | None) -> dict:
         }
 
     report = json.loads(path.read_text(encoding="utf-8"))
-    dataset_hash = hashlib.sha256(settings.DATA_PATH.read_bytes()).hexdigest().upper()
+    dataset_hash = canonical_dataset_sha256(settings.DATA_PATH)
     if report["dataset"]["sha256"].upper() != dataset_hash:
         return {
             "available": False,
